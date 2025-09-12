@@ -77,13 +77,13 @@ class T5Block(nn.Module):
     def forward(self,x,attn_mask,encoder_output=None):
         if encoder_output:
            for layer in self.layer:
-                if layer is T5LayerSelfAttention:
-                   x=x+layer(x,attn_mask,encoder_output)
+                if isinstance(layer, T5LayerSelfAttention):
+                    x=x+layer(x,attn_mask,encoder_output)
                 else:
                    x=x=layer(x,attn_mask)
         else:
             for layer in self.layer:
-                x=x+layer(x)
+                x=x+layer(x,attn_mask)
 
         return x        
 
@@ -177,7 +177,7 @@ class T5Attention(nn.Module):
         mask = attn_mask[:, None, None, :]  # [B, 1, 1, T]
         attn = attn.masked_fill(mask == 0, float('-inf'))
 
-        if self.bias:
+        if self.is_causal:
             attn=attn.masked_fill(self.bias[:,:,T,:T]==0,float("-inf"))
         attn=F.softmax(attn,dim=-1)
 

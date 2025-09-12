@@ -4,8 +4,10 @@ import torch.nn.functional as F
 from transformers import AutoModelForSeq2SeqLM,AutoTokenizer
 from datasets import load_dataset,DatasetDict
 from torch.utils.data import Dataset,DataLoader
-from peft import get_peft_model, PromptTuningConfig, PromptTuningInit, TaskType
+from peft import get_peft_model, PromptTuningConfig, LoraConfig,PromptTuningInit, TaskType
+from torch.optim import AdamW
 
+device="cuda" if torch.cuda.is_available() else "cpu"
 
 model_name="t5-small"
 model=AutoModelForSeq2SeqLM.from_pretrained(model_name)
@@ -45,11 +47,7 @@ def proprocess(dataset):
 
 token_dataset=new_dataset.map(proprocess,batched=True,remove_columns=new_dataset["train"].column_names)
 
-
         
-
-
-
 
 tokens_train=DatasetDict({
     "input_ids":token_dataset["train"]["input_ids"],
@@ -82,24 +80,6 @@ class ImdbDataset(Dataset):
         }    
 
 
-def collate_fn(batch):
-    input_ids=batch["input_ids"]
-    attention_mask=batch["attention_mask"]
-    labels=batch["labels"]
-
-    new_batch = tokenizer.pad(
-        {"input_ids": input_ids, "attention_mask": attention_mask},
-        return_tensors="pt"
-    )
-    max_label_len = max(len(l) for l in labels)
-    padded_labels = [l + [pad_id] * (max_label_len - len(l)) for l in labels]
-    labels = torch.tensor(padded_labels, dtype=torch.long)
-    labels[labels == tokenizer.pad_token_id] = -100
-
-    new_batch["labels"] = labels
-
-    return new_batch
-
 
 
 
@@ -108,6 +88,8 @@ val_dataset=ImdbDataset(tokens_val)
 
 train_loader=DataLoader(train_dataset,batch_size=4,shuffle=True)
 val_loader=DataLoader(val_dataset,batch_size=8,shuffle=False)
+
+
 
 
 peft_config = PromptTuningConfig(
@@ -121,5 +103,102 @@ peft_config = PromptTuningConfig(
 )
 
 model_soft=AutoModelForSeq2SeqLM.from_pretrained(model_name)
-peft_model = get_peft_model(model_soft, peft_config)
+model_soft = get_peft_model(model_soft, peft_config)
 
+
+# LoRA config
+lora_config = LoraConfig(
+    r=8,
+    lora_alpha=32,
+    target_modules=["q_proj", "v_proj"],  # works for T5, BART, etc.
+    lora_dropout=0.1,
+    bias="none",
+    task_type="SEQ_2_SEQ_LM"
+)
+
+model_lora=AutoModelForSeq2SeqLM.from_pretrained(model_name)
+
+model_lora = get_peft_model(model_lora, lora_config)
+
+
+
+optimizer_soft = AdamW(model_soft.parameters(), lr=5e-5, weight_decay=0.01)
+optimizer_lora = AdamW(model_lora.parameters(), lr=5e-5, weight_decay=0.01)
+
+def model_train(model,device,train_loader,val_loader,num_epochs,optimizer,grad_clip=None):
+    model=model.to(device)
+    train_losses=[]
+    val_losses=[]
+    train_epoch_losses=[]
+    val_epoch_losses=[]
+
+
+    for epoch in range(num_epochs):
+        print(f"epoch: {epoch+1}/{num_epochs}")
+        model.train()
+        running_val_loss=0
+        running_train_loss=0
+        for train_step, batch in enumerate(train_loader):
+            
+           
+
+            optimizer.zero_grad()
+            input_ids=batch["input_ids"]
+            attn_mask=batch["attention_mask"]
+            labels=batch["label"]
+            output=model(input_ids=input_ids.to(device),
+                        attention_mask=attn_mask.to(device),
+                        labels=labels.to(device))
+            
+            loss=output.loss
+            loss.backward()
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
+            running_train_loss += loss.item()
+            if(train_step%100==0):
+                train_losses.append(loss.item())
+                if(train_step%130==0):
+                    print(f"train_loss as step {train_step} : {loss.item()}")
+
+
+
+        train_avg_loss=running_train_loss/len(train_loader)
+        train_epoch_losses.append(train_avg_loss)
+        print(f"train_loss for epoch {epoch}:{train_avg_loss}")
+        model.eval()
+
+        with torch.no_grad():
+            for val_step,batch in enumerate(val_loader):
+                          
+                input_ids=batch["input_ids"]
+                attn_mask=batch["attention_mask"]
+                labels=batch["label"]
+                output=model(input_ids=input_ids.to(device),
+                            attention_mask=attn_mask.to(device),
+                            labels=labels.to(device))
+                loss=output.loss
+                
+
+                running_val_loss +=loss.item()
+                val_losses.append(loss.item())
+
+                if(val_step%20==0):
+                    print(f"val_loss as step {val_step} : {loss.item()}")
+            val_avg_loss= running_val_loss/len(val_loader)
+            val_epoch_losses.append(val_avg_loss)
+
+            print(f"val loss for epoch {epoch} : {val_avg_loss}")
+
+    return {
+        "train_step_losses": train_losses,
+        "train_epoch_losses": train_epoch_losses,
+        "val_step_losses": val_losses,
+        "val_epoch_losses": val_epoch_losses
+    }
+
+
+
+soft_prompt_results=model_train(model_soft,device=device,train_loader=train_loader,val_loader=val_loader,num_epochs=4,optimizer=optimizer_soft,grad_clip=1.0)
+
+lora_results=model_train(model_lora,device=device,train_loader=train_loader,val_loader=val_loader,num_epochs=4,optimizer=optimizer_lora,grad_clip=1.0)
