@@ -91,6 +91,7 @@ val_loader=DataLoader(val_dataset,batch_size=8,shuffle=False)
 
 
 
+#soft config
 
 peft_config = PromptTuningConfig(
     peft_type="PROMPT_TUNING",
@@ -110,7 +111,7 @@ model_soft = get_peft_model(model_soft, peft_config)
 lora_config = LoraConfig(
     r=8,
     lora_alpha=32,
-    target_modules=["q_proj", "v_proj"],  # works for T5, BART, etc.
+    target_modules=["DenseReluDense.wi", "DenseReluDense.wo"],  # T5 feed-forward
     lora_dropout=0.1,
     bias="none",
     task_type="SEQ_2_SEQ_LM"
