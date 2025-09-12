@@ -28,7 +28,7 @@ idx_to_label={0:"negative",1:"positive"}
 
 
 max_input_len=512
-max_target_len=2
+max_target_len=1
 pad_id = tokenizer.pad_token_id
 
 def proprocess(dataset):
